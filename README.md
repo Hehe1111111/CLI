@@ -32,7 +32,7 @@ scoop bucket add hehe1111111 https://github.com/Hehe1111111/scoop-bucket
 scoop install ani-cli
 ```
 
-Both pull dependencies (`jq`, `fzf`, `mpv`, `python`) as prebuilt binaries.
+Both pull dependencies (jq, fzf, mpv, python) as prebuilt binaries — no admin rights, no compiling, no waiting on apt/choco. Update any time with brew upgrade ani-cli or scoop update ani-cli.
 
 <details>
 <summary>Manual install (no package manager)</summary>
