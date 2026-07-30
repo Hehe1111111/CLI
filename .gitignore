@@ -1,0 +1,27 @@
+# Local tooling / secrets
+opencode.json
+agentrouter-proxy.js
+
+# Project meta (not for distribution)
+PLAN.md
+PROJECT_CONTEXT.md
+.opencode/
+
+# Tests
+tests/
+test_*.sh
+
+# Provider dev / tools
+providers/common.sh
+
+# Caches / artifacts
+__pycache__/
+*.pyc
+downloads/
+mpv-shot*.jpg
+
+# OS / editor noise
+.DS_Store
+*.log
+*.swp
+*~
