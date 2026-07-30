@@ -19,19 +19,36 @@
 
 ### Install
 
+**macOS / Linux (Homebrew):**
+```bash
+brew tap Hehe1111111/tap
+brew install ani-cli
+```
+
+**Windows (Scoop):**
+```powershell
+scoop bucket add extras
+scoop bucket add hehe1111111 https://github.com/Hehe1111111/scoop-bucket
+scoop install ani-cli
+```
+
+Both pull dependencies (`jq`, `fzf`, `mpv`, `python`) as prebuilt binaries — no admin rights, no compiling, no waiting on `apt`/`choco`. Update any time with `brew upgrade ani-cli` or `scoop update ani-cli`.
+
+<details>
+<summary>Manual install (no package manager)</summary>
+
 **Linux / macOS / Git Bash (Windows):**
 ```bash
 curl -sL https://raw.githubusercontent.com/Hehe1111111/CLI/main/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell, run as Administrator):**
 ```powershell
 irm https://raw.githubusercontent.com/Hehe1111111/CLI/main/install.ps1 | iex
 ```
 
-<sub>Git Bash install: runs bash script inside Git Bash. PowerShell install: native .ps1 installs deps via Scoop/Chocolatey, creates wrapper that calls run.sh via Git Bash.</sub>
-
-Auto-detects your OS, resolves dependencies, and sets up `ani-cli`.
+Auto-detects your OS, resolves dependencies via your system package manager, and sets up `ani-cli`. Slower and needs admin/sudo, but works with zero extra tools.
+</details>
 
 ### Quick start
 

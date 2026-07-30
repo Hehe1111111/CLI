@@ -145,10 +145,15 @@ install_self() {
     fi
 }
 
-# Only auto-install in interactive mode (no args)
-if [ $# -eq 0 ]; then
-    install_self
-fi
+# Only auto-install in interactive mode (no args) — and only when we're not
+# already managed by a package manager. Homebrew/Linuxbrew (Cellar/Homebrew/
+# linuxbrew) and Scoop (scoop/apps) already put a wrapper on PATH; a second
+# self-installed symlink there would just be redundant and confusing on
+# upgrade/uninstall.
+case "$SCRIPT_DIR" in
+    */Cellar/*|*/Homebrew/*|*/linuxbrew/*|*/scoop/apps/*) : ;;
+    *) [ $# -eq 0 ] && install_self ;;
+esac
 
 # ── Entry ─────────────────────────────────────────────────────────
 check_deps

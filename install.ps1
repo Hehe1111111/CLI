@@ -51,8 +51,12 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 }
 
 # ── Dependencies ──────────────────────────────────────────────────
+# --no-dependencies skips the KB* Windows-update packages that Chocolatey
+# pulls in as transitive deps of vcredist — they're downloaded then immediately
+# skipped on Windows 10/11, wasting several minutes for no benefit.
+# vcredist140 is listed explicitly so mpv/python still get their C++ runtime.
 Info "Installing dependencies (git, curl, jq, fzf, mpv, python)..."
-choco install -y --no-progress git curl jq fzf mpv python
+choco install -y --no-progress --no-dependencies git curl jq fzf mpv python vcredist140
 if ($LASTEXITCODE -ne 0) { Warn "Chocolatey reported errors above — check which package failed before continuing." }
 Refresh-Env
 
@@ -98,8 +102,13 @@ if ($pythonExe) {
 # Written with explicit LF line endings — bash chokes on the CRLF that
 # PowerShell's normal file-writing cmdlets would otherwise leave in.
 $posixAppDir = ConvertTo-PosixPath $appDir
+$posixChocoBin = ConvertTo-PosixPath "C:\ProgramData\chocolatey\bin"
+$posixBinDir = ConvertTo-PosixPath $binDir
 $launcher = @(
     '#!/usr/bin/env bash',
+    "# Chocolatey installs mpv/python/etc. to its own bin dir — Git Bash",
+    "# doesn't always inherit it from the Windows PATH, so prepend it here.",
+    "export PATH=`"$posixChocoBin:$posixBinDir:`$PATH`"",
     "cd `"$posixAppDir`" || { echo `"ani-cli: app directory missing`" >&2; exit 1; }",
     'exec ./run.sh "$@"'
 ) -join "`n"
