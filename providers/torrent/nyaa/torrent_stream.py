@@ -420,7 +420,7 @@ def stream_torrent(magnet_or_path, buffer_mb=50, episode=1, season=None, abs_ep=
             pass
 
     metadata_waits = 0
-    retried = False
+    retried_count = 0       # escalating re-announce schedule
     while running:
         try:
             st = handle.status()
@@ -435,11 +435,20 @@ def stream_torrent(magnet_or_path, buffer_mb=50, episode=1, season=None, abs_ep=
         if st.has_metadata:
             break
         metadata_waits += 1
-        if metadata_waits >= 10 and not retried:   # ~5s without metadata
-            log("No metadata yet — retrying...")
+        # Report liveness during the silent metadata phase so the UI can
+        # show the user something instead of a frozen bar for up to 60s.
+        if metadata_waits % 2 == 1:        # every ~1s (0.5s sleep granularity)
+            log(f"Fetching metadata… (peers {st.num_peers}, {st.num_seeds} seeds)")
+        # Escalating re-announce: magnet links frequently need several nudges
+        # before a peer answers. More aggressive early-retry shortens the
+        # "no metadata yet" stall significantly.
+        retry_marks = (10, 30, 60, 90)     # ~5s, ~15s, ~30s, ~45s
+        if metadata_waits in retry_marks:
             handle.force_reannounce()
-            retried = True
-        elif metadata_waits > 120:                 # ~60s hard cap
+            handle.force_dht_announce()
+            retried_count += 1
+            log(f"Metadata: re-announced ({retried_count})")
+        if metadata_waits > 120:                 # ~60s hard cap
             log("Failed to get metadata — no peers?")
             print("[torrent] FAIL:metadata", flush=True)
             sys.exit(1)
@@ -594,7 +603,14 @@ def stream_torrent(magnet_or_path, buffer_mb=50, episode=1, season=None, abs_ep=
             time.sleep(1)
             continue
 
+        # Still pulling metadata after the early loop — keep the user-facing
+        # status line alive here too (otherwise the UI freezes on
+        # 'Buffering: ' with no data).
         if st.state == lt.torrent_status.downloading_metadata:
+            md_now = int(time.time())
+            if md_now - last_progress_log >= 1:
+                log(f"Fetching metadata… (peers {st.num_peers}, {st.num_seeds} seeds)")
+                last_progress_log = md_now
             time.sleep(0.5)
             continue
 

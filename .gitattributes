@@ -1,0 +1,21 @@
+# Ensure bash scripts always check out with LF on Windows (Git for Windows
+# otherwise rewrites text files to CRLF, which breaks bash with cryptic
+# "$'\r': command not found" errors and "\r" inside multi-line strings).
+*.sh        text eol=lf
+*.bash      text eol=lf
+.gitattributes text eol=lf
+run.sh      text eol=lf
+
+# PowerShell / cmd scripts must be CRLF on Windows.
+*.ps1       text eol=crlf
+*.cmd       text eol=crlf
+
+# Python is line-ending agnostic but consistent-LF keeps diffs clean.
+*.py        text eol=lf
+
+# Binary assets — never touch them.
+*.png       binary
+*.jpg       binary
+*.ico       binary
+*.exe       binary
+*.dll       binary

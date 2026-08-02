@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
+# macOS system bash is 3.2 (2006); the app needs 4+. Re-exec with a newer
+# brew bash automatically when we can find one — protects users who
+# install via curl|bash on default macOS.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    for _b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [ -x "$_b" ]; then
+            exec "$_b" "$0" "$@"
+        fi
+    done
+    echo "ani-cli needs bash 4+ — you have ${BASH_VERSION:-unknown}." >&2
+    echo "  macOS:  brew install bash" >&2
+    exit 1
+fi
 set -uo pipefail
 
-VERSION="2.0.0"
+VERSION="2.0.1"
 APP="ani-cli"
 
 # ── Paths ─────────────────────────────────────────────────────────
@@ -171,6 +184,7 @@ else
     anilist_auth
     [ -f "$USERNAME_FILE" ] && user_name=$(cat "$USERNAME_FILE")
     save_config
+    animate_logo_once   # quick unfold — cosmetic, never blocks
     anilist_prefetch_home
     main_menu
 fi

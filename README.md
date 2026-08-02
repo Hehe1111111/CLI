@@ -9,9 +9,9 @@
 
 <br>
 
-<p align="center"><a href="https://github.com/Hehe1111111/CLI"><img src="https://img.shields.io/badge/Linux-000000?style=for-the-badge&logo=linux&logoColor=white" alt="Linux" /></a><a href="https://github.com/Hehe1111111/CLI"><img src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS" /></a><a href="https://github.com/Hehe1111111/CLI"><img src="https://custom-icon-badges.demolab.com/badge/Windows-000000?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows" /></a></p>
+<p align="center"><a href="https://github.com/Hehe1111111/CLI"><img src="./assets/badges_platforms.png" width="350" alt="Linux · macOS · Windows" /></a></p>
 
-<p align="center"><a href="https://github.com/Hehe1111111/CLI"><img src="https://img.shields.io/badge/Bash-000000?style=for-the-badge&logo=gnubash&logoColor=white" alt="Bash" /></a><a href="https://github.com/Hehe1111111/CLI"><img src="https://img.shields.io/badge/Python-000000?style=for-the-badge&logo=python&logoColor=white" alt="Python" /></a><a href="./LICENSE"><img src="https://img.shields.io/badge/MIT-000000?style=for-the-badge&logo=opensourceinitiative&logoColor=white" alt="MIT License" /></a></p>
+<p align="center"><a href="https://github.com/Hehe1111111/CLI"><img src="./assets/badges_stack.png" width="300" alt="Bash · Python · MIT License" /></a></p>
 
 </div>
 

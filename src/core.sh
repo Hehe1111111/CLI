@@ -159,11 +159,14 @@ play_loop() { # $1=mid $2=title $3=start ep $4=total $5=method
             return 0
         fi
         local next=$((ep + 1))
+        # Fire the background search/resolve FIRST so the prep below hits
+        # the warm prefetch file instead of re-issuing its own provider
+        # search (the old order had prep read an empty cache and search
+        # twice per episode).
+        _prefetch_next_episode "$mid" "$title" "$ep" "$method" "$provider"
         # Seamless autoplay: prepare ep N+1 DURING the countdown — the
         # torrent engine starts buffering / the stream proxy pre-starts.
         _prep_start "$mid" "$title" "$next" "$method"
-        # Consolidated prefetch for all methods (OPT-2)
-        _prefetch_next_episode "$mid" "$title" "$ep" "$method" "$provider"
         autoplay_countdown "$next" || { _prep_cancel "$next"; return 0; }
         AUTOPLAYING=true   # later episodes reuse the same choices, no re-picking
         ep=$next
@@ -343,8 +346,11 @@ _play_one_stream() {
         print_error "No stream found for $clean_title Ep $ep_num on any provider"
         return 1
     fi
-    local sub=""
-    echo "$url" | grep -q "^sub:" && sub=$(echo "$url" | grep "^sub:" | sed 's/^sub://') && url=$(echo "$url" | grep -v "^sub:" | head -1)
+    # Split an optional "sub:<path>" line off the URL without spawning
+    # grep/sed/head (this runs on every episode).
+    local sub="${url#*$'\n'sub:}"
+    [ "$sub" = "$url" ] && sub=""
+    url="${url%%$'\n'sub:*}"   # url lines come first
 
     # Optional per-provider playback metadata (declared in the provider file)
     PROVIDER_HEADERS=()
@@ -375,7 +381,9 @@ _play_one_stream() {
         fi
         local wait=0
         while [ $wait -lt 100 ]; do
-            url=$(head -1 "$url_file" 2>/dev/null)
+            # Pure-bash read: this loop polls at 10Hz; a head subprocess per
+            # iteration was pure waste (spawn ≈ 2ms × 100 iters).
+            IFS= read -r url < "$url_file" 2>/dev/null || url=""
             [ -n "$url" ] && break
             kill -0 "$serve_pid" 2>/dev/null || break
             if _read_key 0.1 && _key_is_esc; then
@@ -442,7 +450,14 @@ _torrent_wait_ready() { # $1=engine_pid $2=ready_file $3=progress_file $4=max_wa
     stty_save=$(stty -g 2>/dev/null || true)
     [ -n "$stty_save" ] && stty -echo 2>/dev/null
     while [ $wait -lt $max_wait ]; do
-        video_path=$(grep -E "^(http://|/)" "$ready_file" 2>/dev/null | tail -1 || true)
+        # Pure-bash read (no grep|tail subprocess per 0.5s poll iteration).
+        video_path=""
+        if [ -r "$ready_file" ]; then
+            local _rln
+            while IFS= read -r _rln; do
+                case "$_rln" in http://*|https://*|/*) video_path="$_rln" ;; esac
+            done < "$ready_file"
+        fi
         # engine reports either a local bridge URL (http://127.0.0.1)
         # or a plain file path — only the path needs an existence check
         if [ -n "$video_path" ]; then
@@ -452,7 +467,15 @@ _torrent_wait_ready() { # $1=engine_pid $2=ready_file $3=progress_file $4=max_wa
             esac
         fi
         kill -0 "$engine_pid" 2>/dev/null || { sleep 0.5; break; }
-        progress_line=$(tail -1 "$progress_file" 2>/dev/null | grep "^\[torrent\]" || true)
+        # Pure-bash read (no tail/grep subprocess spawn per 0.5s poll — the
+        # spawn cost dominated: ~3.3ms/iter × hundreds of iters per buffer wait).
+        progress_line=""
+        if [ -r "$progress_file" ]; then
+            local _ln
+            while IFS= read -r _ln; do
+                case "$_ln" in \[torrent\]*) progress_line="$_ln" ;; esac
+            done < "$progress_file"
+        fi
         [ -n "$progress_line" ] && echo -ne "\r\033[K${STYLE_MUTED}Buffering: ${progress_line#\[torrent\] }${R}" >&2
         if _read_key 0.5 && _key_is_esc; then
             [ -n "$stty_save" ] && stty "$stty_save" 2>/dev/null
@@ -514,21 +537,17 @@ _prep_start_torrent() { # $1=mid $2=title $3=next $4=statefile
     [ -f "$pref_file" ] && IFS='|' read -r grp res < "$pref_file" 2>/dev/null || true
     local json
     json=$(cat "/tmp/ani-cli_prefetch_tor_${mid}_${next}" 2>/dev/null)
-    echo "$json" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null || \
+    # Cheap sanity probe (no python): provider search emits a JSON array
+    case "${json#"${json%%[![:space:]]*}"}" in \[*) : ;; *) json="" ;; esac
+    [ -z "$json" ] && \
         json=$(call_torrent_provider "$pid" search "$clean" "$(printf "%02d" "$next")" "$quality" "$grp" "$res" 2>/dev/null)
+    # magnet + season in ONE spawn (was two separate -c invocations per autoplay)
     local parsed
-    parsed=$(echo "$json" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    if d:
-        print(d[0].get('magnet','') or '')
-        print(d[0].get('target_season','') or '')
-except Exception: pass
-" 2>/dev/null)
+    parsed=$(echo "$json" | python3 "${SCRIPT_DIR}/src/torrent_parse.py" pick 2>/dev/null)
+    # pick mode prints magnet/group/res/season (in that order); only magnet
+    # and season are needed on the prep path.
     local magnet tseas
-    magnet=$(echo "$parsed" | sed -n '1p')
-    tseas=$(echo "$parsed" | sed -n '2p')
+    { IFS= read -r magnet; IFS= read -r _; IFS= read -r _; IFS= read -r tseas; } <<< "$parsed"
     [ -z "$magnet" ] && { rm -f "$state"; return 0; }
     local -a sargs=()
     [[ "$tseas" =~ ^[0-9]+$ ]] && sargs=(--season "$tseas")
@@ -660,13 +679,25 @@ _play_one_torrent() {
     if [ "$adopted" -eq 0 ]; then
     local ep=$(printf "%02d" "$ep_num")
 
+    # One consolidated python entry point for search-JSON field extraction —
+    # the old code spawned python 5-9 times per torrent episode
+    # (~60ms process startup each). torrent_parse.py does all modes in one
+    # spawn per call.
+    local TORPARSE="${SCRIPT_DIR}/src/torrent_parse.py"
+
     # Reuse the search results prefetched during the previous episode.
     local json=""
     local pf="/tmp/ani-cli_prefetch_tor_${mid}_${ep_num}"
     if [ -f "$pf" ]; then
         json=$(cat "$pf" 2>/dev/null)
         rm -f "$pf"
-        echo "$json" | python3 -c "import sys,json; json.load(sys.stdin)" &>/dev/null || json=""
+        # Cheap JSON sanity check without a python spawn: valid provider
+        # output always starts with '['. A truncated/corrupt prefetch falls
+        # through to a live search below.
+        case "${json#"${json%%[![:space:]]*}"}" in
+            \[*) : ;;                    # likely valid — full parse happens in summary
+            *) json="" ;;
+        esac
     fi
 
     if [ -z "$json" ]; then
@@ -700,46 +731,23 @@ _play_one_torrent() {
     # fallback magnets) — spawning python 9 times per episode was measurable.
     local count magnet tor_group tor_res tor_size tor_season extra
     local parsed
-    parsed=$(echo "$json" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    d = []
-print(len(d))
-if d:
-    r = d[0]
-    print(r.get('magnet','') or '')
-    print(r.get('group','') or '')
-    print(r.get('resolution','') or '')
-    print(r.get('size','') or '')
-    print(r.get('target_season','') or '')
-" 2>/dev/null)
-    count=$(echo "$parsed" | sed -n '1p')
+    parsed=$(echo "$json" | python3 "$TORPARSE" summary 2>/dev/null)
+    {
+        IFS= read -r count
+        IFS= read -r magnet
+        IFS= read -r tor_group
+        IFS= read -r tor_res
+        IFS= read -r tor_size
+        IFS= read -r tor_season
+    } <<< "$parsed"
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     [ "$count" -eq 0 ] && print_error "No torrent for $clean Ep $ep_num" && return 1
-    magnet=$(echo "$parsed" | sed -n '2p')
-    tor_group=$(echo "$parsed" | sed -n '3p')
-    tor_res=$(echo "$parsed" | sed -n '4p')
-    tor_size=$(echo "$parsed" | sed -n '5p')
-    tor_season=$(echo "$parsed" | sed -n '6p')
     : "${tor_group:=}" "${tor_res:=}" "${tor_season:=}"
 
     echo "${tor_group}|${tor_res}" > "$pref_file"
 
     if [ "$AUTOPLAYING" != "true" ] && [ "$count" -gt 1 ]; then
-        local choices=$(echo "$json" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for i, r in enumerate(d[:5]):
-    g = r.get('group', '') or '?'
-    res = r.get('resolution', '') or '?'
-    sz = r.get('size', '') or '?'
-    sd = r.get('seeds', 0) or 0
-    batch = ' [BATCH]' if r.get('is_batch') else ''
-    trust = ' ✓' if r.get('trusted') else ''
-    print(f\"{i+1}\t[{g}] {res} {sz} {sd}s{batch}{trust}\")
-" 2>/dev/null)
+        local choices=$(echo "$json" | python3 "$TORPARSE" choices 2>/dev/null)
 
         local sel=""
         if [ -t 0 ]; then
@@ -751,22 +759,14 @@ for i, r in enumerate(d[:5]):
             fi
             sel="1	${choices%%$'\n'*}"   # auto-pick first in non-TTY (CLI) mode
         fi
-        local idx=$(echo "$sel" | cut -d$'\t' -f1)
-        parsed=$(echo "$json" | IDX="$idx" python3 -c "
-import sys, json, os
-d = json.load(sys.stdin)
-i = int(os.environ.get('IDX', '1')) - 1
-if 0 <= i < len(d):
-    r = d[i]
-    print(r.get('magnet', '') or '')
-    print(r.get('group', '') or '')
-    print(r.get('resolution', '') or '')
-    print(r.get('target_season', '') or '')
-" 2>/dev/null)
-        magnet=$(echo "$parsed" | sed -n '1p')
-        tor_group=$(echo "$parsed" | sed -n '2p')
-        tor_res=$(echo "$parsed" | sed -n '3p')
-        tor_season=$(echo "$parsed" | sed -n '4p')
+        local idx="${sel%%$'\t'*}"
+        parsed=$(echo "$json" | IDX="$idx" python3 "$TORPARSE" pick 2>/dev/null)
+        {
+            IFS= read -r magnet
+            IFS= read -r tor_group
+            IFS= read -r tor_res
+            IFS= read -r tor_season
+        } <<< "$parsed"
         : "${tor_group:=}" "${tor_res:=}" "${tor_season:=}"
         echo "${tor_group}|${tor_res}" > "$pref_file"
     fi
@@ -775,15 +775,7 @@ if 0 <= i < len(d):
 
     # Candidate magnets: chosen first, then top-ranked fallbacks
     local -a try_magnets=("$magnet")
-    extra=$(echo "$json" | CHOSEN="$magnet" python3 -c "
-import sys, json, os
-d = json.load(sys.stdin)
-chosen = os.environ.get('CHOSEN', '')
-for r in d[:3]:
-    m = r.get('magnet', '') or ''
-    if m and m != chosen:
-        print(m)
-" 2>/dev/null)
+    extra=$(echo "$json" | CHOSEN="$magnet" python3 "$TORPARSE" magnets 2>/dev/null)
     local m
     while IFS= read -r m; do [ -n "$m" ] && try_magnets+=("$m"); done <<< "$extra"
 
@@ -801,17 +793,24 @@ for r in d[:3]:
     local -a resume_args=()
     read -r -a resume_args <<< "$(_resume_frac_args "$mid" "$ep_num")"
 
-    local printed_block=0
-    local fail_codes=()
+    # Clean, single live status line for the whole magnet-attempt loop.
+    # Previous design printed "Reason" + "Retrying with fallback torrent #N"
+    # on separate lines and then tried to erase them with cursor-up codes —
+    # easy to mis-fire (mixed progress-bar + error text overlapped). One
+    # line, rewritten in place, is the entire interface now.
+    local retry_status=""
+
+    # One-line status printer. Always writes with \r so the NEXT \r
+    # overwrites the current status — no cursor-up, no multiline blocks.
+    _torrent_note() { # $1=text
+        echo -ne "\r\033[K${STYLE_MUTED}$1${R}" >&2
+    }
 
     for magnet in "${try_magnets[@]}"; do
         attempt=$((attempt + 1))
         if [ $attempt -gt 1 ]; then
-            if [ $printed_block -eq 1 ]; then
-                echo -ne "\033[2A\r\033[K\r\033[K" >&2
-                printed_block=0
-            fi
-            print_warning "Retrying with fallback torrent #${attempt}..."
+            _torrent_note "Source $attempt — retrying…"
+            sleep 0.6   # not a stall: let the user register the change
         fi
 
         : > "$ready_file" ; : > "$progress_file"
@@ -833,16 +832,13 @@ for r in d[:3]:
         }
 
         if [ -n "$video_path" ]; then
-            # Success — clear any failure block and show playing line
-            if [ $printed_block -eq 1 ]; then
-                echo -ne "\033[2A\r\033[K\r\033[K" >&2
-                printed_block=0
-            fi
+            echo -ne "\r\033[K" >&2   # erase the live status line before printing
             echo -e "${STYLE_SUCCESS}▶ Playing Episode $ep_num${R}" >&2
             break
         fi
 
-        # Engine died without giving a ready URL — extract FAIL code
+        # Engine died without giving a ready URL — show a single muted
+        # reason line, then continue with the next magnet.
         local fail_line=""
         fail_line=$(grep '^\[torrent\] FAIL:' "$progress_file" 2>/dev/null | head -1 || true)
         local code=""
@@ -851,22 +847,13 @@ for r in d[:3]:
         fi
         local reason=""
         case "$code" in
-            no-progress) reason="No download progress" ;;
-            metadata)    reason="Failed to get metadata" ;;
-            no-video)    reason="No matching episode file" ;;
-            *)           reason="Failed to start torrent" ;;
+            no-progress) reason="no progress" ;;
+            metadata)    reason="metadata unavailable" ;;
+            no-video)    reason="no matching episode file" ;;
+            *)           reason="could not start" ;;
         esac
-        echo -e "\r\033[K${STYLE_MUTED}${reason}${R}" >&2
-        if [ $attempt -lt ${#try_magnets[@]} ]; then
-            echo "Retrying with fallback torrent $((attempt + 1))." >&2
-            printed_block=1
-        else
-            # Final failure — clear block, let the final error print
-            if [ $printed_block -eq 1 ]; then
-                echo -ne "\033[2A\r\033[K\r\033[K" >&2
-                printed_block=0
-            fi
-        fi
+        retry_status="Source ${attempt}: ${reason}"
+        _torrent_note "$retry_status"
         kill "$engine_pid" 2>/dev/null || true
     done
     fi   # end of the non-adopted (normal search+launch) path
@@ -905,7 +892,14 @@ for r in d[:3]:
     (
         local last=""
         while true; do
-            pl=$(tail -1 "$progress_file" 2>/dev/null | grep "^\[torrent\]" || true)
+            # Pure-bash tail (no subprocess per second of playback).
+            pl=""
+            if [ -r "$progress_file" ]; then
+                local _ln
+                while IFS= read -r _ln; do
+                    case "$_ln" in \[torrent\]*) pl="$_ln" ;; esac
+                done < "$progress_file"
+            fi
             if [ -n "$pl" ] && [ "$pl" != "$last" ]; then
                 last="$pl"
                 echo -ne "\r\033[K${STYLE_SUCCESS}▶ Playing Episode $ep_num${R}  ${STYLE_MUTED}${pl#\[torrent\] }${R}" >&2

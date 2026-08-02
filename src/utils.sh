@@ -1,5 +1,16 @@
 # ── Utilities ─────────────────────────────────────────────────────
 
+# Open a URL in the user's default browser, best-effort across platforms.
+# Linux: xdg-open. macOS: open. Windows (Git Bash / MSYS): cmd start.
+_open_url() {
+    local url="$1"
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)  cmd /c start "" "$url" ;;
+        Darwin*)                open "$url" ;;
+        *)                      xdg-open "$url" ;;
+    esac
+}
+
 check_deps() {
     local missing=()
     for cmd in curl jq fzf mpv python3; do

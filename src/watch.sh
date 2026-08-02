@@ -74,18 +74,29 @@ mpv_watch_start() { # $1=sock $2=outfile → prints watcher pid
     # pipe open, the command substitution would block until the watcher exits
     # (20s connect deadline), stalling every playback start and leaving the
     # watcher dead before mpv even launches (no resume points, ever).
-    python3 - "$1" "$2" >/dev/null 2>&1 <<'EOF' &
-import socket, json, sys, time, os
+    ANI_CLI_IPC="$1" python3 - "$2" >/dev/null 2>&1 <<'EOF' &
+import json, os, socket, sys, time
 
-sock_path, out = sys.argv[1], sys.argv[2]
+# Cross-platform: POSIX gets a unix-socket path, Windows gets tcp://HOST:PORT
+# (Git Bash/MSYS translate AF_UNIX differently per distribution, and mpv
+# itself needs a tcp:// URL on native Windows).
+ipc, out = os.environ["ANI_CLI_IPC"], sys.argv[1]
+if ipc.startswith("tcp://"):
+    host, port = ipc[6:].split(":", 1)
+    connect_target = ("tcp", host, int(port))
+else:
+    connect_target = ("unix", ipc, None)
 
 def connect():
     deadline = time.time() + 60
     while time.time() < deadline:
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(3)
-            s.connect(sock_path)
+            if connect_target[0] == "tcp":
+                s = socket.create_connection((connect_target[1], connect_target[2]), timeout=3)
+            else:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(3)
+                s.connect(connect_target[1])
             return s
         except OSError:
             time.sleep(0.3)
@@ -157,10 +168,27 @@ EOF
 # remaining mpv args come from global MPV_EXTRA_ARGS array
 play_mpv() {
     local mid="$1" ep="$2" title="$3" url="$4" sub="${5:-}" skip_lua="${6:-}"
-    local sock="/tmp/ani-cli_mpv_$$.sock"
     local posfile="/tmp/ani-cli_mpvpos_$$.txt"
     local mpv_log="/tmp/ani-cli_mpv_err.log"
-    rm -f "$sock" "$posfile"
+    # mpv IPC: unix sockets on POSIX; tcp:// on Windows/MSYS where AF_UNIX
+    # semantics diverge per runtime (MSYS2 vs Git Bash vs Cygwin). The
+    # watcher connects through whichever scheme we set.
+    local sock ipc_addr
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            # Pick a random free port via bash's /dev/tcp trick is unreliable;
+            # let the OS choose by binding 0 — python does this for us below.
+            # Simpler: random high port; collision odds are tiny.
+            sock="tcp://127.0.0.1:$((20000 + RANDOM % 20000))"
+            ipc_addr="$sock"
+            ;;
+        *)
+            sock="/tmp/ani-cli_mpv_$$.sock"
+            ipc_addr="$sock"
+            rm -f "$sock"
+            ;;
+    esac
+    rm -f "$posfile"
     : > "$mpv_log"
 
     # --quiet (not --really-quiet): no status line spam, but errors still
@@ -168,7 +196,7 @@ play_mpv() {
     # --ytdl=no: everything we play is a direct URL (HLS/file/bridge); the
     # youtube-dl hook would otherwise interrogate every http:// URL and add
     # a multi-second stall (or outright failure) before playback starts.
-    local -a args=("$url" "--input-ipc-server=$sock" "--force-media-title=$title" "--quiet" "--ytdl=no")
+    local -a args=("$url" "--input-ipc-server=$ipc_addr" "--force-media-title=$title" "--quiet" "--ytdl=no")
     local start_pos=0
     local resume; resume=$(resume_get "$mid" "$ep")
     if [ -n "$resume" ]; then
@@ -188,7 +216,7 @@ play_mpv() {
     [ ${#MPV_EXTRA_ARGS[@]} -gt 0 ] && args+=("${MPV_EXTRA_ARGS[@]}")
 
     local watcher_pid=""
-    watcher_pid=$(mpv_watch_start "$sock" "$posfile")
+    watcher_pid=$(mpv_watch_start "$ipc_addr" "$posfile")
     local t0=$SECONDS user_killed=0
     # stdout → /dev/null: mpv's track list/AO/VO and ffmpeg keepalive spam
     # must never reach the terminal. stderr → log: real errors stay
@@ -222,7 +250,10 @@ play_mpv() {
     # may miss the final seek). IPC must not overwrite poller data on failure.
     local pos=0 dur=0
     [ -f "$posfile" ] && read -r pos dur < "$posfile"
-    if [ -S "$sock" ] && command -v python3 &>/dev/null; then
+    # IPC final-position query — skip on tcp:// (the socket test `-S` is
+    # unix-only; on Windows we rely on the poller file the watcher already
+    # wrote).
+    if [ "${ipc_addr#tcp://}" = "$ipc_addr" ] && [ -S "$sock" ] && command -v python3 &>/dev/null; then
         local ipc_posfile="/tmp/ani-cli_mpvpos_$$_ipc.txt"
         local attempt=0
         while [ $attempt -lt 3 ]; do
@@ -271,7 +302,8 @@ EOF
     fi
 
     [ -n "$watcher_pid" ] && kill "$watcher_pid" 2>/dev/null
-    rm -f "$sock" "$posfile"
+    [ "${ipc_addr#tcp://}" = "$ipc_addr" ] && rm -f "$sock"
+    rm -f "$posfile"
 
     # mpv died almost immediately without playing anything (and the user
     # didn't kill it): playback failed — surface the error and stop
@@ -403,6 +435,10 @@ aniskip_lua() { # $1=media_id $2=ep
     command -v python3 &>/dev/null || return 1
     local mid="$1" ep="$2"
     local mal_id
+    # Route diagnostics to a stable log — the old code swallowed everything
+    # with 2>/dev/null, which is why "aniskip doesn't work" was undiagnosable.
+    local dbg="${ANISKIP_DEBUG:-/dev/null}"
+    [ "$dbg" = "1" ] && dbg="/tmp/ani-cli_aniskip_err.log"
     mal_id=$(media_entry "$mid" | cut -f3)
     # Validate MAL ID: must be a positive integer (BUG-5 fix)
     if [[ ! "$mal_id" =~ ^[0-9]+$ ]] || [ "$mal_id" -eq 0 ] 2>/dev/null; then
@@ -429,61 +465,15 @@ except: pass
         return 1
     fi
     local json
-    # Increased curl timeout from 15s to 20s for better reliability (BUG-5)
-    json=$(curl -s --connect-timeout 5 --max-time 20 -H "User-Agent: ani-cli/1.0" "https://api.aniskip.com/v1/skip-times/${mal_id}/${ep}?types[]=op&types[]=ed" 2>/dev/null)
+    json=$(curl -s --connect-timeout 5 --max-time 15 -H "User-Agent: ani-cli/1.0" "https://api.aniskip.com/v1/skip-times/${mal_id}/${ep}?types[]=op&types[]=ed" 2>"$dbg")
     [ -z "$json" ] && return 1
-    echo "$json" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except ValueError:
-    sys.exit(1)
-if not d.get('found'):
-    open('$cache', 'w').close()
-    sys.exit(2)
-ivals = []
-for r in d.get('results', []):
-    iv = r.get('interval', {})
-    s, e, t = iv.get('start_time'), iv.get('end_time'), r.get('skip_type', '')
-    if s is None or e is None or e - s < 5 or e - s > 600:
-        continue
-    l = r.get('episode_length') or 0
-    ivals.append((s, e, t, l))
-if not ivals:
-    open('$cache', 'w').close()
-    sys.exit(2)
-lines = ['local intervals = {']
-for s, e, t, l in ivals:
-    lines.append('  { s = %.3f, e = %.3f, t = %s, l = %.3f, done = false },' % (s, e, json.dumps(t), l))
-lines.append('}')
-lines.append('''local LEN_TOLERANCE = 120
-
-mp.observe_property("time-pos", "number", function(_, pos)
-    if not pos then return end
-    local dur = mp.get_property_number("duration")
-    for _, iv in ipairs(intervals) do
-        if not iv.done then
-            local len_ok = (not dur) or iv.l == 0 or math.abs(dur - iv.l) <= LEN_TOLERANCE
-            if len_ok and pos >= iv.s and pos < iv.e - 0.5 then
-                iv.done = true
-                mp.set_property_number("time-pos", iv.e)
-                mp.osd_message("Skipped " .. iv.t, 2)
-                return
-            end
-        end
-    end
-end)''')
-open('$cache', 'w').write('\n'.join(lines) + '\n')
-NAMES = {'op': 'Opening', 'ed': 'Ending'}
-chaps = [';FFMETADATA1']
-for s, e, t, l in sorted(ivals):
-    chaps.append('[CHAPTER]')
-    chaps.append('TIMEBASE=1/1000')
-    chaps.append('START=%d' % int(s * 1000))
-    chaps.append('END=%d' % int(e * 1000))
-    chaps.append('title=' + NAMES.get(t, t.upper()))
-open('${cache%.lua}.ffmetadata', 'w').write('\n'.join(chaps) + '\n')
-" 2>/dev/null
+    # Generation lives in a standalone script (same pattern as uniquestream's
+    # companion .py): the old inline heredoc broke silently when the nested
+    # Lua quotes collided with bash's double-quoted -c body, producing rc=1
+    # with empty stderr ("AniSkip doesn't work").
+    local gen="${SCRIPT_DIR}/src/aniskip_gen.py"
+    [ -f "$gen" ] || return 1
+    echo "$json" | python3 "$gen" "$cache" 2>"$dbg"
     local rc=$?
     [ $rc -eq 2 ] && return 1
     if [ $rc -ne 0 ]; then

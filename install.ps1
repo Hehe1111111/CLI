@@ -84,18 +84,34 @@ if (Test-Path "$appDir\.git") {
 
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 
-# ── python3 alias ─────────────────────────────────────────────────
-# The app calls `python3` everywhere. Chocolatey's `python` package only
-# provides `python.exe` (no `python3` shim, unlike Scoop) — so every
-# torrent/subtitle/AniList call would silently fail without this. A real
-# .exe (not a .cmd) is required: Git Bash cannot resolve bare commands to
-# .cmd/.bat files, only to .exe.
-$pythonExe = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
-if ($pythonExe) {
-    Copy-Item $pythonExe (Join-Path $binDir "python3.exe") -Force
-    Ok "python3 -> $pythonExe"
+# ── python3 resolution ──────────────────────────────────────────────
+# The app calls `python3` everywhere. On Windows the modern Python
+# installer (3.11+) already ships a `python3.exe` entry point, so the
+# old "copy python.exe to python3.exe" trick is unnecessary AND buggy:
+# Python uses the resolve path of its own executable to discover its
+# home (DLLs/Lib/venv landmarks), and copying the binary into a
+# different directory makes it lose them — every python3 call would
+# then fail with "could not find platform independent libraries".
+# Only fall through to a shim when python3 genuinely does not exist.
+$python3Exe = (Get-Command python3.exe -ErrorAction SilentlyContinue).Source
+if ($python3Exe) {
+    Ok "python3: $python3Exe"
 } else {
-    Warn "python.exe not found — torrent/subtitle features will fail until Python is installed."
+    $pythonExe = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+    if (-not $pythonExe) {
+        Warn "python.exe not found — torrent/subtitle features will fail until Python is installed."
+    } else {
+        # python3.exe missing AND we must NOT copy python.exe (breaks home
+        # discovery: stdlib stops resolving when the binary is relocated).
+        # Git Bash only runs bare files or .exe — a .cmd shim is NOT found,
+        # so write a tiny bash script `python3` (no extension) into our
+        # own bin dir; it forwards every arg to the real interpreter.
+        $shimPath = Join-Path $binDir "python3"
+        $pyPosix  = ConvertTo-PosixPath $pythonExe
+        $shimBody = @("#!/usr/bin/env bash", "exec `"$pyPosix`" `"`$@`"") -join "`n"
+        [System.IO.File]::WriteAllText($shimPath, $shimBody + "`n")
+        Ok "python3 shim -> $pythonExe"
+    }
 }
 
 # ── Bash launcher ────────────────────────────────────────────────
@@ -110,7 +126,9 @@ $launcher = @(
     "# doesn't always inherit it from the Windows PATH, so prepend it here.",
     "export PATH=`"$posixChocoBin:$posixBinDir:`$PATH`"",
     "cd `"$posixAppDir`" || { echo `"ani-cli: app directory missing`" >&2; exit 1; }",
-    'exec ./run.sh "$@"'
+    # bash-explicit: a CRLF-corrupted or non-executable run.sh would
+    # otherwise break `exec ./run.sh` with a confusing "bad interpreter".
+    'exec bash ./run.sh "$@"'
 ) -join "`n"
 [System.IO.File]::WriteAllText("$binDir\ani-cli-launch.sh", $launcher + "`n")
 
@@ -141,6 +159,25 @@ $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
 if ($machinePath -notlike "*$binDir*") {
     [Environment]::SetEnvironmentVariable("PATH", "$machinePath;$binDir", "Machine")
     Info "Added $binDir to the system PATH."
+}
+
+# ── libtorrent (optional — torrent streaming) ─────────────────────
+# Chocolatey has NO package that ships the PYTHON libtorrent binding
+# (its `libtorrent` package is qBittorrent's C++ library, unusable from
+# python). The wheel on PyPI is the only working route on Windows.
+Info "Installing Python libtorrent (torrent streaming support)..."
+$pipTarget = $python3Exe
+if (-not $pipTarget) { $pipTarget = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+if ($pipTarget) {
+    & $pipTarget -m pip install --upgrade pip 2>&1 | Out-Null
+    & $pipTarget -m pip install libtorrent 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Ok "libtorrent installed — torrent streaming available."
+    } else {
+        Warn "libtorrent wheel unavailable for this Python version/build."
+        Warn "Site streaming still works; torrent mode needs libtorrent."
+        Warn "Try: py -3 -m pip install libtorrent  (after re-opening the shell)"
+    }
 }
 
 Ok "Done."

@@ -1,12 +1,20 @@
-import sys, re, urllib.request
+import sys, re, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from socketserver import ThreadingMixIn
+try:
+    import requests
+    from requests.adapters import HTTPAdapter
+except ImportError:
+    requests = None
 
 # UniqueStream HLS proxy.
 # Key insight (verified 2026-07-26): the AES-128 HLS key is the media_id
 # embedded in the playlist URL, hex-decoded to 16 bytes. No CDN key fetch
 # needed. Segments are served as .png on the CDN; renamed to .ts here.
+# Perf: segments go through a keep-alive session when 'requests' is
+# installed. Without it each PTS-sized .ts was a fresh TLS handshake
+# (~300ms each on busy links).
 
 url_file = sys.argv[1]
 with open(url_file) as f:
@@ -28,7 +36,22 @@ KEY = bytes.fromhex(m.group(1))
 HDRS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
 cache = {}
 
+_session = None
+if requests is not None:
+    _session = requests.Session()
+    _session.headers.update(HDRS)
+    _adapter = HTTPAdapter(pool_connections=4, pool_maxsize=16, max_retries=1)
+    _session.mount("https://", _adapter)
+    _session.mount("http://", _adapter)
+
+_seg_lock = threading.Lock()
+
 def cdn_get(path_qs):
+    if _session is not None:
+        r = _session.get(f"{CDN}{path_qs}", timeout=15)
+        r.raise_for_status()
+        return r.content
+    import urllib.request
     req = urllib.request.Request(f"{CDN}{path_qs}", headers=HDRS)
     return urllib.request.urlopen(req, timeout=15).read()
 

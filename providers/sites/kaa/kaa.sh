@@ -19,8 +19,11 @@ UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/5
 
 _kaa_api_post() {
     local endpoint="$1"
-    # normalize (× → x) + JSON-encode in ONE python spawn
-    local json_payload=$(python3 -c "import sys,json; s=sys.stdin.read().strip().replace('×','x'); print(json.dumps({'query': s}))" <<< "$2" 2>/dev/null)
+    # normalize (× → x) + JSON-encode. jq is ~10x lighter than python per
+    # call (5.6ms vs 61ms) and is already a hard app dependency.
+    local s="${2//×/x}"
+    local json_payload
+    json_payload=$(jq -cn --arg q "$s" '{query:$q}' 2>/dev/null) || return 1
     curl -s --max-time 15 --connect-timeout 10 -X POST "${KAA_BASE}${endpoint}" \
         -H "Content-Type: application/json" \
         -H "User-Agent: ${UA}" \
@@ -259,9 +262,17 @@ provider_get_stream() {
     if [ -f "$out_cache" ]; then
         local oage=$(($(date +%s) - $(_file_mtime "$out_cache")))
         if [ "$oage" -lt 3500 ]; then
-            local c_serve c_sub c_ok=1
-            c_serve=$(sed -n 's/^serve://p' "$out_cache" 2>/dev/null | head -1)
-            c_sub=$(sed -n 's/^sub://p' "$out_cache" 2>/dev/null | head -1)
+            # Pure-bash line extraction (was: sed × 2 + head × 2 = 4 spawns
+            # on EVERY warm resolve — the whole point of a warm cache is
+            # to be cheap).
+            local c_serve="" c_sub="" _ln
+            while IFS= read -r _ln; do
+                case "$_ln" in
+                    serve:*) [ -z "$c_serve" ] && c_serve="${_ln#serve:}" ;;
+                    sub:*)   [ -z "$c_sub" ]   && c_sub="${_ln#sub:}" ;;
+                esac
+            done < "$out_cache"
+            local c_ok=1
             [ -n "$c_serve" ] && [ ! -f "$c_serve" ] && c_ok=0
             case "$c_sub" in /*) [ ! -f "$c_sub" ] && c_ok=0 ;; esac
             if [ "$c_ok" = "1" ]; then
@@ -277,6 +288,10 @@ provider_get_stream() {
 
     local ep_slug=$(_kaa_find_ep_slug "$slug" "$ep_num")
     [ -z "$ep_slug" ] && return 1
+
+    # server-empty episodes are a kaa content gap (SPY×FAMILY S1 confirmed
+    # en-US + ja-JP both servers:[]); do NOT probe alternatives — it doubles
+    # the page fetch for zero recovery.
 
     # v3 cache: manifest_url + server_url + sub_url (24h), keyed by SLUG —
     # a re-resolved slug naturally misses the old entry, so wrong-show

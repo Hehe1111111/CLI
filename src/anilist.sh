@@ -28,7 +28,7 @@ anilist_auth() {
 
     if command -v python3 &>/dev/null; then
         print_info "Opening browser..."
-        xdg-open "https://anilist.co/api/v2/oauth/authorize?client_id=${ANILIST_CLIENT_ID}&redirect_uri=${ANILIST_REDIRECT}&response_type=code" 2>/dev/null || true
+        _open_url "https://anilist.co/api/v2/oauth/authorize?client_id=${ANILIST_CLIENT_ID}&redirect_uri=${ANILIST_REDIRECT}&response_type=code" 2>/dev/null || true
         python3 -c '
 import http.server, urllib.parse, sys
 class H(http.server.BaseHTTPRequestHandler):
@@ -91,11 +91,16 @@ anilist_query() {
     local -a auth_hdr=()
     [ -n "$access_token" ] && auth_hdr=(-H "Authorization: Bearer $access_token")
     local body http_code attempt
+    # Encode the GraphQL query once OUTSIDE the retry loop: a jq spawn per
+    # attempt was pure waste (old code re-encoded on 429/503 retries).
+    local jq_query
+    jq_query=$(jq -Rs . <<< "$query")
+    local payload="{\"query\":${jq_query},\"variables\":${vars}}"
     for attempt in 1 2 3; do
         body=$(curl -s --compressed --max-time 15 --connect-timeout 5 -w $'\n%{http_code}' -X POST "$ANILIST_API" \
             -H "Content-Type: application/json" \
             ${auth_hdr[@]+"${auth_hdr[@]}"} \
-            -d "{\"query\":$(echo "$query" | jq -Rs .),\"variables\":$vars}")
+            -d "$payload")
         http_code="${body##*$'\n'}"
         body="${body%$'\n'*}"
         case "$http_code" in
@@ -171,7 +176,7 @@ anilist_search() {
 anilist_current_lists() {
     local uid="$1"
     local key="lists_${uid}"
-    _anilist_cache_get "$key" 300 && return 0
+    _anilist_cache_get "$key" 600 && return 0
     # Extended query with nextAiringEpisode, idMal, and mediaListEntry for OPT-4
     local query='query ($uid: Int, $s: [MediaListStatus]) { MediaListCollection (userId: $uid, type: ANIME, status_in: $s) { lists { entries { mediaId status score progress updatedAt media { id idMal title { userPreferred } episodes format nextAiringEpisode { episode airingAt } mediaListEntry { status progress } } } } } }'
     local out; out=$(anilist_query "$query" "{\"uid\":$uid,\"s\":[\"CURRENT\",\"REPEATING\"]}")
@@ -227,26 +232,54 @@ anilist_set_status() {
 }
 
 # Entry for one anime on the user's list + MAL id (for skip-times).
-# Output: "status<TAB>progress<TAB>idMal" (status empty when not on list)
+# Output: "status<TAB>progress<TAB>idMal" (status empty when not on list).
+# IMPORTANT (BUG: aniskip "doesn't work"): mediaListEntry requires the OAuth
+# token, but this output ALSO feeds status/progress to tracking.sed. To keep
+# calls cheap AND correct we split the reshape across two sources:
+#   - Floor: read idMal + list status from the public, 30-min-cached
+#     anilist_media_details (no auth dependency — aniskip works signed or not).
+#   - Fresh list snapshot: still query mediaListEntry when authed (it changes
+#     as the user watches). Non-auth clients skip that round-trip.
 anilist_media_entry() {
     local media_id="$1"
-    local query='query ($id: Int) { Media (id: $id) { idMal mediaListEntry { status progress } } }'
-    anilist_query "$query" "{\"id\":$media_id}" | python3 -c "
-import sys, json
+    local details="" entry=""
+    details=$(anilist_media_details "$media_id" 2>/dev/null)
+    # Fresh auth-only list status overlay (skipped entirely when unauthenticated,
+    # so skip-times work for logged-out users too).
+    if [ -n "$access_token" ]; then
+        entry=$(anilist_query 'query ($id: Int) { Media (id: $id) { mediaListEntry { status progress } } }' "{\"id\":$media_id}" 2>/dev/null)
+    fi
+    ANILIST_DETAILS="$details" ANILIST_ENTRY="$entry" python3 - <<'PYEOF' 2>/dev/null
+import sys, json, os
+status = ''
+progress = 0
+mal = ''
 try:
-    d = json.load(sys.stdin)
+    d = json.loads(os.environ.get('ANILIST_DETAILS', '') or '{}')
     m = d.get('data', {}).get('Media', {}) or {}
+    mal = m.get('idMal') or ''
     e = m.get('mediaListEntry') or {}
-    print(f\"{e.get('status','')}\t{e.get('progress',0)}\t{m.get('idMal','') or ''}\")
+    if e:
+        status = e.get('status') or ''
+        progress = e.get('progress') or 0
 except Exception:
     pass
-" 2>/dev/null
+try:
+    d2 = json.loads(os.environ.get('ANILIST_ENTRY', '') or '{}')
+    e2 = (d2.get('data', {}).get('Media', {}) or {}).get('mediaListEntry') or {}
+    if e2:
+        status = e2.get('status') or status
+        progress = e2.get('progress') or progress
+except Exception:
+    pass
+print(f"{status}\t{progress}\t{mal}")
+PYEOF
 }
 
 anilist_media_details() {
     local media_id="$1"
     local key="details_${media_id}"
-    _anilist_cache_get "$key" 1800 && return 0
+    _anilist_cache_get "$key" 3600 && return 0
     local query='query ($id: Int) { Media (id: $id) { id idMal title { userPreferred } format episodes duration status seasonYear season meanScore genres studios(isMain: true) { nodes { name } } startDate { year month day } description (asHtml: false) nextAiringEpisode { episode airingAt } mediaListEntry { status progress } } }'
     local out; out=$(anilist_query "$query" "{\"id\":$media_id}")
     _anilist_valid "$out" && echo "$out" | _anilist_cache_set "$key"

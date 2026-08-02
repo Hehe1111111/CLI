@@ -85,9 +85,20 @@ case "$PLATFORM" in
     *)       warn "Unknown OS — install manually: curl jq fzf mpv python3 git" ;;
 esac
 
-for cmd in curl jq fzf mpv python; do
+# The app invokes `python3` everywhere — that name must resolve. A bare
+# `python` is not enough (`python` is often Python 2 or missing entirely).
+for cmd in curl jq fzf mpv python3; do
     command -v "$cmd" &>/dev/null || warn "missing: $cmd"
 done
+
+# Optionally: libtorrent for torrent streaming (site streaming works without).
+if ! python3 -c "import libtorrent" 2>/dev/null; then
+    case "$PLATFORM" in
+        mac)      warn "libtorrent unavailable — torrent mode disabled (brew install libtorrent-rasterbar).";;
+        windows)  warn "libtorrent unavailable — torrent mode disabled (pip install libtorrent).";;
+        *)        warn "libtorrent unavailable — torrent mode disabled (install python3-libtorrent / libtorrent-rasterbar).";;
+    esac
+fi
 
 # ── Install / update the app ──────────────────────────────────────
 if [ -d "$APP_DIR/.git" ]; then

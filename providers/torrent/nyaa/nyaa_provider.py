@@ -523,6 +523,32 @@ def compute_score(r, target_ep, target_quality, preferred_group, preferred_resol
     elif marker_rel == "mismatch":
         marker_score = W_MARKER_MISMATCH
         tier += 2
+    elif q_marker is None and target_season is None:
+        # Plain-franchise query ("One Piece") vs a release that names a
+        # DIFFERENT sub-series ("One Piece: Gyojin Tou-hen", "One Piece
+        # Log - Fish-Man Island Saga"): ep numbers collide (both have ep 1),
+        # so ranking must prove show-identity, not just episode-number. A
+        # release's *core title* is the text between the closing ']' and
+        # the first episode-number token; if that title's token set
+        # contains words the query lacks, it's a different show.
+        rn = r.get("name", "")
+        # Drop '[Group]' tag, then split off the part after the LAST
+        # ' - NN' marker (that keeps subtitles containing hyphens intact,
+        # e.g. 'Show - Stone Ocean').
+        body = re.sub(r"^\s*\[[^\]]*\]\s*", "", rn)
+        cut = re.search(r"[-–]\s*\d{1,4}\b", body)
+        core = body[: cut.start()] if cut else body
+        # Strip bracketed blobs and the trailing parenthesised sub-info.
+        core = re.sub(r"\[[^\]]*\]", " ", core)
+        core = re.sub(r"\([^)]*\)", " ", core)
+        core_toks = set(t for t in re.sub(r"[^a-z ]", " ", core.lower()).split() if t)
+        q_toks = set(t for t in re.sub(r"[^a-z ]", " ", (r.get("_q_full") or "").lower()).split() if t)
+        # 'Show - Stone Ocean' core = {'show','stone','ocean'}, query
+        # tokens {'show'} → subset => fine; 'Show Log - Fish Saga' core
+        # adds 'log','fish','saga' not in query => mismatch.
+        if q_toks and core_toks and not core_toks <= q_toks:
+            marker_score = W_MARKER_MISMATCH
+            tier += 2
 
     ova_flag = 1.0 if is_ova(r.get("name", "")) else 0.0
 
@@ -552,8 +578,13 @@ def compute_score(r, target_ep, target_quality, preferred_group, preferred_resol
 
     return score, tier
 
-def rank_results(results, target_ep, target_quality, preferred_group=None, preferred_resolution=None, target_season=None, q_marker=None):
+def rank_results(results, target_ep, target_quality, preferred_group=None, preferred_resolution=None, target_season=None, q_marker=None, q_full=None):
     now = datetime.now(timezone.utc)
+
+    # Attach the plain anime query so the scoring step can tell "One Piece"
+    # (user's show) apart from "One Piece Gyojin Tou-hen" (different show).
+    for r in results:
+        r["_q_full"] = q_full or ""
 
     filtered = []
     for r in results:
@@ -690,7 +721,7 @@ def cmd_search(args):
     if not merged and queries_p2:
         absorb(fire(queries_p2))
 
-    ranked = rank_results(list(merged.values()), target_ep, quality, preferred_group, preferred_res, target_season, q_marker)
+    ranked = rank_results(list(merged.values()), target_ep, quality, preferred_group, preferred_res, target_season, q_marker, q_full=name)
 
     # Trimmed output contract: exactly the fields the app consumes.
     output = []

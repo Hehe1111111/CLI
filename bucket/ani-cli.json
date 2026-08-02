@@ -1,10 +1,10 @@
 {
-    "version": "2.0.0",
+    "version": "2.0.1",
     "description": "Stream & torrent anime from your terminal",
     "homepage": "https://github.com/Hehe1111111/CLI",
     "license": "MIT",
     "url": "https://github.com/Hehe1111111/CLI/archive/refs/heads/main.zip",
-    "hash": "a575f47b61e6c49abb8ed0f32b6553eb2fd2ec8df7247f741b0b7e25333941b2",
+    "#": "hash is maintained by the scoop-bucket repo's autoupdate flow; leaving it unset is safer than a stale value.",
     "extract_dir": "CLI-main",
     "depends": [
         "main/git",
@@ -19,6 +19,7 @@
         "$bashExe = (Get-Command bash.exe -ErrorAction SilentlyContinue).Source",
         "if (-not $bashExe) { $bashExe = Join-Path (Split-Path (Get-Command git.exe).Source) '..\\bin\\bash.exe' | Resolve-Path -ErrorAction SilentlyContinue }",
         "if (-not $bashExe) { Write-Host '[ani-cli] bash.exe not found - is the git dependency installed?' -ForegroundColor Red; return }",
+        "Scoop installs run.sh without the executable bit; invoke via bash explicitly so the launcher is robust.",
         "$cmd = @(",
         "    '@echo off',",
         "    'setlocal',",
@@ -26,7 +27,7 @@
         ") -join \"`r`n\"",
         "[System.IO.File]::WriteAllText(\"$dir\\ani-cli.cmd\", $cmd + \"`r`n\")",
         "Write-Host '[ani-cli] Attempting optional torrent support (pip install libtorrent)...' -ForegroundColor Cyan",
-        "python -m pip install --quiet --user libtorrent 2>$null",
+        "python -m pip install --quiet libtorrent 2>$null",
         "if ($LASTEXITCODE -ne 0) { Write-Host '[ani-cli] libtorrent wheel unavailable for this Python version - site streaming still works, torrent will not.' -ForegroundColor Yellow }"
     ],
     "checkver": {

@@ -23,29 +23,46 @@ mkdir -p "$UNI_CACHE_DIR" 2>/dev/null
 
 # Append a key|value mapping with a timestamp.
 _uni_cache_put() { # $1=file $2=key $3=value
-    echo "$2|$3|$(date +%s)" >> "$1"
+    local now
+    printf -v now '%(%s)T' -1 2>/dev/null || now=$(date +%s)
+    printf '%s|%s|%s\n' "$2" "$3" "$now" >> "$1"
 }
 
 # Look up a FRESH mapping (7d TTL; legacy lines without a timestamp are
-# treated as stale and re-resolved). $2 is a grep pattern (caller-escaped).
-_uni_cache_get() { # $1=file $2=key-pattern
-    local line val ts
-    line=$(grep "^$2|" "$1" 2>/dev/null | tail -1)
+# treated as stale and re-resolved). Pure-bash: one file read, no subshell
+# chain (was grep+tail+cut+cut+date = ~5 process spawns per call).
+_uni_cache_get() { # $1=file $2=plain-key (NOT a regex)
+    local key="$2" line="" _l val ts now klen
+    [ -f "$1" ] || return 1
+    klen=${#key}
+    # Take the LAST matching line (newest) — pure-bash scan, prefix match
+    # via substring (case would treat [ and * in the key as globs).
+    while IFS= read -r _l; do
+        [ "${_l:0:klen}" = "$key" ] && [ "${_l:klen:1}" = "|" ] && line="$_l"
+    done < "$1"
     [ -z "$line" ] && return 1
-    val=$(echo "$line" | cut -d'|' -f2)
-    ts=$(echo "$line" | cut -d'|' -f3)
+    # key|value|timestamp
+    val="${line#*|}"; ts="${val##*|}"; val="${val%|*}"
     [[ "$ts" =~ ^[0-9]+$ ]] || return 1
-    [ $(( $(date +%s) - ts )) -lt "$UNI_CACHE_TTL" ] && echo "$val" && return 0
+    printf -v now '%(%s)T' -1 2>/dev/null || now=$(date +%s)
+    [ $((now - ts)) -lt "$UNI_CACHE_TTL" ] && printf '%s' "$val" && return 0
     return 1
 }
 
 _uni_norm() {
-    python3 -c "import sys; s=sys.stdin.read().strip(); s=s.replace('×','x'); sys.stdout.write(s)" <<< "$1"
+    # Pure-bash: strip + normalize × → x (bash glob handles the multibyte char).
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"   # lstrip
+    s="${s%"${s##*[![:space:]]}"}"   # rstrip
+    s="${s//×/x}"
+    printf '%s' "$s"
 }
 
 _uni_urlenc() {
+    # jq @uri is ~11x faster than a python spawn (5.6ms vs 61.6ms) and jq is
+    # already a hard dependency. Normalize first, then let jq handle quoting.
     local s=$(_uni_norm "$1")
-    python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" <<< "$s"
+    printf '%s' "$s" | jq -sRr @uri
 }
 
 _uni_fetch_series() {
@@ -56,7 +73,8 @@ _uni_fetch_series() {
         [ "$age" -lt 86400 ] && { cat "$cache"; return 0; }
     fi
     local data=$(curl -s --max-time 25 --connect-timeout 10 "${UNI_BASE}/api/v1/series/${id}" -H "User-Agent: ${UA}" 2>/dev/null)
-    if [ -n "$data" ] && echo "$data" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('title') else 1)" 2>/dev/null; then
+    # jq validity probe (was a python spawn on every cold series fetch).
+    if [ -n "$data" ] && echo "$data" | jq -e '.title' >/dev/null 2>&1; then
         echo "$data" > "$cache" 2>/dev/null
         echo "$data"
         return 0
@@ -78,11 +96,21 @@ _uni_fetch_anilist_media() {
     local cache="$UNI_CACHE_DIR/anilist_${alid}.json"
     if [ -f "$cache" ]; then
         local age=$(($(date +%s) - $(_file_mtime "$cache")))
-        [ "$age" -lt 86400 ] && { cat "$cache"; return 0; }
+        if [ "$age" -lt 86400 ]; then
+            local cached; cached=$(cat "$cache")
+            # Replay only valid responses — a transient API outage body
+            # (e.g. AniList's "temporarily disabled" error JSON) used to be
+            # cached for 24h and replayed as if it were real data.
+            if printf '%s' "$cached" | jq -e '.data.Media.id' >/dev/null 2>&1; then
+                printf '%s' "$cached"
+                return 0
+            fi
+            rm -f "$cache"
+        fi
     fi
     local q='{"query":"query($id:Int){Media(id:$id){id idMal title{romaji english userPreferred} episodes season seasonYear format}}","variables":{"id":'${alid}'}}'
     local data=$(curl -s --max-time 15 --connect-timeout 10 "$ANILIST_API" -H "Content-Type: application/json" -H "Accept: application/json" -d "$q" 2>/dev/null)
-    if [ -n "$data" ]; then
+    if [ -n "$data" ] && printf '%s' "$data" | jq -e '.data.Media.id' >/dev/null 2>&1; then
         echo "$data" > "$cache"
         echo "$data"
         return 0
@@ -126,33 +154,24 @@ provider_get_stream() {
     local id_mal=""
     local base_title="$title"
 
-    # Fetch AniList media info once (for base title + MAL ID)
+    # Fetch AniList media info once (for base title + MAL ID).
+    # jq replaces the old python spawn + two sed greps — one ~6ms call
+    # instead of ~60+2ms worth of process starts.
     anilist_media=$(_uni_fetch_anilist_media "$anilist_id")
     if [ -n "$anilist_media" ]; then
-        local parsed=$(echo "$anilist_media" | python3 -c "
-import sys, json, re
-try:
-    d = json.load(sys.stdin)
-    m = d.get('data',{}).get('Media',{})
-    mal = m.get('idMal')
-    t = m.get('title',{})
-    full = t.get('english') or t.get('userPreferred') or t.get('romaji') or ''
-    base = re.sub(r'\s+(Season|Part|Cour)\s+\d+.*$', '', full, flags=re.IGNORECASE)
-    base = re.sub(r'\s+(Final Season).*$', '', base, flags=re.IGNORECASE)
-    base = re.sub(r'\s+[IVXLCDM]+\s*:\s*', ' ', base)
-    base = re.sub(r'\s+', ' ', base).strip()
-    out = []
-    if mal: out.append(f'mal:{mal}')
-    if base: out.append(f'base:{base}')
-    print('|'.join(out))
-except: pass
-" 2>/dev/null)
-        if [ -n "$parsed" ]; then
-            local mal_part=$(echo "$parsed" | sed -n 's/.*mal:\([0-9][0-9]*\).*/\1/p' | head -1)
-            local base_part=$(echo "$parsed" | sed -n 's/.*base://p' | head -1)
-            [ -n "$mal_part" ] && id_mal="$mal_part"
-            [ -n "$base_part" ] && base_title="$base_part"
-        fi
+        local mal_part base_part
+        mal_part=$(echo "$anilist_media" | jq -r '.data.Media.idMal // empty' 2>/dev/null)
+        base_part=$(echo "$anilist_media" | jq -r '
+            .data.Media.title
+            | (.english // .userPreferred // .romaji // "")
+            | gsub("\\s+(?i:Season|Part|Cour)\\s+\\d+.*$"; "")
+            | gsub("\\s+(?i:Final Season).*$"; "")
+            | gsub("\\s+[IVXLCDM]+\\s*:\\s*"; " ")
+            | gsub("\\s+"; " ")
+            | sub("^ "; "") | sub(" $"; "")
+        ' 2>/dev/null)
+        [ -n "$mal_part" ] && id_mal="$mal_part"
+        [ -n "$base_part" ] && [ "$base_part" != "null" ] && base_title="$base_part"
     fi
 
     # Resolve content_id from AniList ID cache (7d TTL)
@@ -163,7 +182,8 @@ except: pass
 
     # Resolve content_id from title cache or search (use base series title)
     if [ -z "$content_id" ]; then
-        local cached=$(_uni_cache_get "$UNI_TITLE_CACHE" "$(echo "$title" | sed 's/[^^]/[&]/g; s/\^/\\^/g')")
+        # Plain-key lookup (no regex escaping needed — bash prefix compare).
+        local cached=$(_uni_cache_get "$UNI_TITLE_CACHE" "$title")
         if [ -n "$cached" ]; then
             content_id="$cached"
         else
