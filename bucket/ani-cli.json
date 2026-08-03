@@ -15,7 +15,7 @@
     ],
     "notes": "Torrent support depends on a Python wheel for libtorrent and may not be available for every Python version - site streaming always works regardless.",
     "bin": "ani-cli.cmd",
-    "post_install": [
+    "pre_install": [
         "$bashExe = (Get-Command bash.exe -ErrorAction SilentlyContinue).Source",
         "if (-not $bashExe) { $bashExe = Join-Path (Split-Path (Get-Command git.exe).Source) '..\\bin\\bash.exe' | Resolve-Path -ErrorAction SilentlyContinue }",
         "if (-not $bashExe) { Write-Host '[ani-cli] bash.exe not found - is the git dependency installed?' -ForegroundColor Red; return }",
@@ -25,7 +25,9 @@
         "    'setlocal',",
         "    \"`\"$bashExe`\" `\"$dir\\run.sh`\" %*\"",
         ") -join \"`r`n\"",
-        "[System.IO.File]::WriteAllText(\"$dir\\ani-cli.cmd\", $cmd + \"`r`n\")",
+        "[System.IO.File]::WriteAllText(\"$dir\\ani-cli.cmd\", $cmd + \"`r`n\")"
+    ],
+    "post_install": [
         "Write-Host '[ani-cli] Attempting optional torrent support (pip install libtorrent)...' -ForegroundColor Cyan",
         "python -m pip install --quiet libtorrent 2>$null",
         "if ($LASTEXITCODE -ne 0) { Write-Host '[ani-cli] libtorrent wheel unavailable for this Python version - site streaming still works, torrent will not.' -ForegroundColor Yellow }"

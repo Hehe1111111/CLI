@@ -5,6 +5,7 @@ class AniCli < Formula
   version "2.0.1"
   license "MIT"
 
+  depends_on "bash"
   depends_on "curl"
   depends_on "jq"
   depends_on "fzf"
