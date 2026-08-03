@@ -14,7 +14,7 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
 fi
 set -uo pipefail
 
-VERSION="2.0.1"
+VERSION="2.0.2"
 APP="ani-cli"
 
 # ── Paths ─────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ class AniCli < Formula
   desc "Stream & torrent anime from your terminal"
   homepage "https://github.com/Hehe1111111/CLI"
   url "https://github.com/Hehe1111111/CLI.git", branch: "main"
-  version "2.0.1"
+  version "2.0.2"
   license "MIT"
 
   depends_on "bash"
