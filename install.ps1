@@ -56,8 +56,20 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 # skipped on Windows 10/11, wasting several minutes for no benefit.
 # vcredist140 is listed explicitly so mpv/python still get their C++ runtime.
 Info "Installing dependencies (git, curl, jq, fzf, mpv, python)..."
-choco install -y --no-progress --no-dependencies git curl jq fzf mpv python vcredist140
-if ($LASTEXITCODE -ne 0) { Warn "Chocolatey reported errors above — check which package failed before continuing." }
+$chocoPackages = @('git', 'curl', 'jq', 'fzf', 'mpv', 'python', 'vcredist140')
+foreach ($pkg in $chocoPackages) {
+    # One package at a time + one retry: choco's batch install gives no
+    # indication WHICH package failed, and downloads (esp. fzf from GitHub
+    # releases) flake out on fresh machines. A per-package loop with a
+    # retry turns a silent "deps missing at runtime" into a clean install.
+    $attempts = 0
+    do {
+        $attempts++
+        if ($attempts -gt 1) { Info "Retrying $pkg (attempt $attempts/2)..." }
+        choco install -y --no-progress --no-dependencies $pkg | Out-Host
+    } while ($LASTEXITCODE -ne 0 -and $attempts -lt 2)
+    if ($LASTEXITCODE -ne 0) { Warn "$pkg failed to install — check the Chocolatey output above." }
+}
 Refresh-Env
 
 foreach ($cmd in @('git', 'curl', 'jq', 'fzf', 'mpv', 'python')) {
@@ -169,7 +181,8 @@ Info "Installing Python libtorrent (torrent streaming support)..."
 $pipTarget = $python3Exe
 if (-not $pipTarget) { $pipTarget = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
 if ($pipTarget) {
-    & $pipTarget -m pip install --upgrade pip 2>&1 | Out-Null
+    # No `pip install --upgrade pip` here — choco's python ships a working
+    # pip, and upgrading it downloads another ~10MB for zero user value.
     & $pipTarget -m pip install libtorrent 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Ok "libtorrent installed — torrent streaming available."

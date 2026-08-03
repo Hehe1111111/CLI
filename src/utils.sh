@@ -13,14 +13,34 @@ _open_url() {
 
 check_deps() {
     local missing=()
+    local cmd
     for cmd in curl jq fzf mpv python3; do
-        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+        if ! command -v "$cmd" &>/dev/null && ! command -v "$cmd.exe" &>/dev/null; then
+            missing+=("$cmd")
+        fi
     done
-    if [ ${#missing[@]} -gt 0 ]; then
-        print_error "Missing: ${missing[*]}"
-        print_info "Install with your package manager, e.g.: sudo apt install ${missing[*]}"
-        exit 1
-    fi
+    [ ${#missing[@]} -eq 0 ] && return 0
+
+    local hint
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            if command -v choco &>/dev/null; then
+                hint="choco install -y ${missing[*]/python3/python}"
+            else
+                hint="scoop install ${missing[*]/python3/python}   (or: choco install -y ${missing[*]/python3/python})"
+            fi
+            ;;
+        Darwin*)
+            hint="brew install ${missing[*]/python3/python}"
+            ;;
+        *)
+            hint="sudo apt install ${missing[*]}   (or the dnf/pacman equivalents)"
+            ;;
+    esac
+    print_error "Missing dependencies: ${missing[*]}"
+    print_info "Install them with: $hint"
+    print_info "Then re-run ani-cli. Site streaming needs all of: curl jq fzf mpv python3"
+    exit 1
 }
 
 # Wipe every /tmp cache the app and its providers create. Keeps config,
