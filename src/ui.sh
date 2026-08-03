@@ -53,8 +53,6 @@ animate_logo_once() {
     [ -t 1 ] || return 0                        # not a tty → no animation
     [ -n "$_animate_done" ] && return 0         # only once per session
     _animate_done=1
-    local i nlines
-    while IFS= read -r _; do nlines=$((nlines+1)); done <<< "$LOGO"
     # Draw the logo one row at a time with a 1-frame pause between rows
     # — looks like a quick "unfold" on start-up.
     while IFS= read -r line; do
